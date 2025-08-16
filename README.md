@@ -107,3 +107,14 @@ This project is licensed under the BSD-3-Clause-Clear License. See the [LICENSE]
 ---
 
 **Built with ❤️ by the Zama team**
+
+
+sepolia测试命令
+npm run compile
+npm run deploy:sepolia
+HARDHAT_MAX_WORKERS=$(nproc) npx hardhat test --bail --no-compile test/FHESwapSimple.sepolia.step.ts --network sepolia
+运行命令合约部分
+npx hardhat deploy --network sepolia --reset  强制重新部署
+
+本地测试
+ npx hardhat test test/FHESwapUser.ts

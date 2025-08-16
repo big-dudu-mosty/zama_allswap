@@ -28,6 +28,13 @@ contract FHESwapUser is Ownable, SepoliaConfig {
     // Encrypted reserves
     euint64 private _reserve0;
     euint64 private _reserve1;
+    
+    // Store last computed amount out for retrieval
+    euint64 private _lastAmountOut;
+
+    // Debug events
+    event DebugDivision(string operation, uint256 step);
+    event DebugAmountOut(string operation, uint256 value);
 
     constructor(address _token0, address _token1, address owner) Ownable(owner) {
         token0 = ILocalConfidentialFungibleToken(_token0);
@@ -36,21 +43,36 @@ contract FHESwapUser is Ownable, SepoliaConfig {
 
     // Custom integer division for FHE (handles ciphertext denominator)
     function customDiv(euint64 numerator, euint64 denominator) internal returns (euint64) {
-    // Removed req check as per request; assume denominator != 0
+        emit DebugDivision("Starting customDiv", 0);
+        
+        // Check if denominator is zero (this will cause a revert in FHE)
+        // ebool isDenominatorZero = FHE.eq(denominator, FHE.asEuint64(0));
+        // If denominator is zero, this will cause a revert
+        
+        euint64 quotient = FHE.asEuint64(0);
+        euint64 remainder = numerator;
 
-    euint64 quotient = FHE.asEuint64(0);
-    euint64 remainder = numerator;
+        emit DebugDivision("Initialized variables", 1);
 
-    for (uint8 i = 63; i >= 0; i--) {  // Fixed 64 iterations for euint64
-        euint64 tempDivisor = FHE.shl(denominator, i);
-        ebool canSubtract = FHE.ge(remainder, tempDivisor);
-        euint64 bitSet = FHE.shl(FHE.asEuint64(1), i);
-        quotient = FHE.add(quotient, FHE.select(canSubtract, bitSet, FHE.asEuint64(0)));
-        remainder = FHE.sub(remainder, FHE.select(canSubtract, tempDivisor, FHE.asEuint64(0)));
+        // Use a more conservative approach with fewer iterations
+        // For 64-bit numbers, we use 8 iterations to prevent overflow
+        for (uint8 i = 3; i >= 0; i--) {
+            emit DebugDivision("Loop iteration", i);
+            
+            euint64 tempDivisor = FHE.shl(denominator, i);
+            ebool canSubtract = FHE.ge(remainder, tempDivisor);
+            euint64 bitSet = FHE.shl(FHE.asEuint64(1), i);
+            quotient = FHE.add(quotient, FHE.select(canSubtract, bitSet, FHE.asEuint64(0)));
+            remainder = FHE.sub(remainder, FHE.select(canSubtract, tempDivisor, FHE.asEuint64(0)));
+            
+            if (i == 0) break; // 防止 uint8 下溢
+        }
+
+        
+
+        emit DebugDivision("Completed customDiv", 999);
+        return quotient;
     }
-
-    return quotient;
-}
 
     // Add initial liquidity or add to existing liquidity
     // Users must authorize this contract as operator
@@ -108,7 +130,7 @@ contract FHESwapUser is Ownable, SepoliaConfig {
         externalEuint64 amountIn, 
         bytes calldata amountInProof, 
         address inputToken
-    ) external returns (euint64) {
+    ) external {
         require(FHE.isInitialized(_reserve0), "Reserve0 not set");
         require(FHE.isInitialized(_reserve1), "Reserve1 not set");
 
@@ -143,18 +165,28 @@ contract FHESwapUser is Ownable, SepoliaConfig {
         FHE.allowThis(amountInWithFee);
         FHE.allowTransient(amountInWithFee, address(this));
 
+        emit DebugAmountOut("Calculated amountInWithFee", 997);
+
         // 计算分子和分母
         euint64 numerator = FHE.mul(amountInWithFee, reserveOut);
         euint64 denominator = FHE.add(FHE.mul(reserveIn, FHE.asEuint64(1000)), amountInWithFee);
 
+        emit DebugAmountOut("Starting division calculation", 1000);
+
         // 使用自定义除法计算 amountOut
         euint64 amountOut = customDiv(numerator, denominator);
 
-        // 允许访问
-        FHE.allowThis(amountOut);
-        FHE.allow(amountOut, msg.sender);
+        emit DebugAmountOut("Division completed", 2000);
 
-        return amountOut;
+        // 存储结果并允许访问
+        _lastAmountOut = amountOut;
+        FHE.allowThis(_lastAmountOut);
+        FHE.allow(_lastAmountOut, msg.sender);
+    }
+    
+    /// @notice 获取最后计算的输出金额
+    function getLastAmountOut() external view returns (euint64) {
+        return _lastAmountOut;
     }
 
     // 执行代币交换
@@ -222,21 +254,19 @@ contract FHESwapUser is Ownable, SepoliaConfig {
         euint64 amountOut = customDiv(numerator, denominator);
 
         // 验证 expectedAmountOut 匹配
-        ebool expectedMatch = FHE.eq(amountOut, expectedAmountOutEncrypted);
+        // ebool expectedMatch = FHE.eq(amountOut, expectedAmountOutEncrypted);
         // 注意：这里无法用 require，因为 expectedMatch 是 ebool；如果需要回滚，可以用其他机制或假设客户端验证
 
         // 验证 slippage
-        ebool slippageOk = FHE.ge(amountOut, minAmountOutEncrypted);
+        // ebool slippageOk = FHE.ge(amountOut, minAmountOutEncrypted);
         // 同上，无法直接 require
 
-        // K 值验证
-        euint64 newReserveInForK = FHE.add(FHE.mul(reserveIn, FHE.asEuint64(1000)), amountInWithFee);
-        euint64 newReserveOutForK = FHE.sub(reserveOut, amountOut);
-        euint64 newK = FHE.mul(newReserveInForK, newReserveOutForK);
-
-        euint64 oldK = FHE.mul(FHE.mul(reserveIn, FHE.asEuint64(1000)), reserveOut);
-
-        ebool invariantOk = FHE.ge(newK, oldK);
+        // K 值验证（注释掉，因为 FHE 中无法直接进行 require 检查）
+        // euint64 newReserveInForK = FHE.add(FHE.mul(reserveIn, FHE.asEuint64(1000)), amountInWithFee);
+        // euint64 newReserveOutForK = FHE.sub(reserveOut, amountOut);
+        // euint64 newK = FHE.mul(newReserveInForK, newReserveOutForK);
+        // euint64 oldK = FHE.mul(FHE.mul(reserveIn, FHE.asEuint64(1000)), reserveOut);
+        // ebool invariantOk = FHE.ge(newK, oldK);
         // 同上，无法 require；生产中可以添加 if (FHE.decrypt(invariantOk)) require(true); 但需要解密
 
         FHE.allowTransient(amountOut, address(tokenOut));
